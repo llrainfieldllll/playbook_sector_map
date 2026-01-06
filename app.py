@@ -8,12 +8,13 @@ import time
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="2026 Focus Scanner", layout="wide")
 
-# ADHD-Optimized CSS: Bigger fonts, clearer labels to reduce eye strain
+# CSS: Metric Cards Styling
 st.markdown("""
     <style>
-    div[data-testid="stMetricValue"] {font-size: 1.8rem;}
-    div[data-testid="stMetricLabel"] {font-weight: bold;}
-    .block-container {padding-top: 2rem;}
+    div[data-testid="stMetricValue"] {font-size: 1.5rem;}
+    div[data-testid="stMetricLabel"] {font-weight: bold; font-size: 1rem;}
+    .block-container {padding-top: 1rem;}
+    div.stButton > button {width: 100%;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -37,67 +38,49 @@ PLAYBOOK = {
     "Quantum": ["RGTI", "IONQ", "IBM", "QBTS"],
     "Drones": ["AVAV", "KTOS", "RCAT", "ONDS", "DPRO"]
 }
-# Flatten for efficient fetching
 ALL_TICKERS = [t.replace('.', '-') for sublist in PLAYBOOK.values() for t in sublist] + ['SPY']
 
-# --- 3. RED TEAM MODULE: STEALTH DATA FETCH ---
+# --- 3. STEALTH DATA FETCH ---
 @st.cache_data(ttl=600)
 def fetch_safe_data(tickers):
-    """
-    Fetches market data using browser impersonation to avoid 403 errors.
-    """
     session = requests.Session(impersonate="chrome")
     data_map = {}
-    
-    # Progress Bar (Visual Feedback for ADHD impatience)
     progress_bar = st.progress(0)
     unique_tickers = list(set(tickers))
     
     for i, ticker in enumerate(unique_tickers):
         try:
-            # Fetch 2 months of data to ensure valid Moving Averages
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=2mo&interval=1d"
             resp = session.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            
             if resp.status_code == 200:
                 res = resp.json()['chart']['result'][0]
                 quotes = res['indicators']['quote'][0]
                 timestamps = res['timestamp']
-                
                 df = pd.DataFrame({
                     'Date': [datetime.fromtimestamp(ts) for ts in timestamps],
                     'Close': quotes['close'],
                     'Volume': quotes['volume']
                 }).dropna()
-                
-                # Validation: Need at least 22 days for the algorithm
-                if len(df) > 22:
-                    data_map[ticker] = df
-                    
-        except Exception:
-            pass # Skip individual failures to keep the app running
-            
-        # Update progress bar sparingly
-        if i % 5 == 0:
-            progress_bar.progress((i + 1) / len(unique_tickers))
+                if len(df) > 22: data_map[ticker] = df
+        except: pass
+        if i % 5 == 0: progress_bar.progress((i + 1) / len(unique_tickers))
             
     progress_bar.empty()
     return data_map
 
-# --- 4. RED TEAM MODULE: ALGORITHM (HARD GATE) ---
+# --- 4. ALGORITHM ---
 def run_strict_algorithm(data_map):
-    results = []
+    sector_results = []
+    stock_results = [] # Keep detailed stock data separate
     
-    # 1. Benchmark (SPY) Logic & Date Sync
     spy = data_map.get('SPY')
-    if spy is None: return pd.DataFrame()
+    if spy is None: return pd.DataFrame(), pd.DataFrame()
     
-    # Capture SPY Date to prevent "Stale Data" trades
     spy_today_date = spy['Date'].iloc[-1].date()
     spy_change = (spy['Close'].iloc[-1] - spy['Close'].iloc[-2]) / spy['Close'].iloc[-2] * 100
 
     for sector, tickers in PLAYBOOK.items():
-        sector_scores = []
+        sector_stock_data = []
         green_stocks = 0
         total_stocks = 0
         
@@ -105,154 +88,114 @@ def run_strict_algorithm(data_map):
             clean_t = t.replace('.', '-')
             df = data_map.get(clean_t)
             if df is None: continue
-            
-            # --- CRITICAL SAFETY CHECK: DATE ALIGNMENT ---
-            # If stock data is old (e.g., halted or delayed), DO NOT use it.
-            stock_date = df['Date'].iloc[-1].date()
-            if stock_date != spy_today_date:
-                continue 
+            if df['Date'].iloc[-1].date() != spy_today_date: continue 
             
             total_stocks += 1
             curr = df.iloc[-1]
             prev = df.iloc[-2]
             
-            # --- METRICS CALCULATION ---
-            # 1. Price Change
             change_pct = (curr['Close'] - prev['Close']) / prev['Close'] * 100
             if change_pct > 0: green_stocks += 1
             
-            # 2. Alpha (Stock vs SPY)
             alpha_val = change_pct - spy_change
-            
-            # 3. Relative Volume (vs previous 20 days)
             avg_vol = df['Volume'].iloc[-22:-2].mean()
             rvol = curr['Volume'] / avg_vol if avg_vol > 0 else 0
-            
-            # 4. Trend (Above MA20)
             sma20 = df['Close'].iloc[-21:-1].mean()
             price_above_ma = curr['Close'] > sma20
             
-            # --- INDIVIDUAL STOCK SCORE (0-100) ---
-            # Used for the coloring of the small boxes in the nested grid
-            stock_score = 0
-            if alpha_val > 0: stock_score += 40
-            if rvol > 1.10: stock_score += 30
-            if price_above_ma: stock_score += 20
-            if change_pct > 0: stock_score += 10
-            
-            sector_scores.append({
+            # Stock Detail Record
+            stock_results.append({
+                'Sector': sector,
                 'Ticker': t,
-                'Alpha': alpha_val,
-                'RVol': rvol,
-                'Above_MA': price_above_ma,
-                'Heat Score': stock_score,
-                'Change %': change_pct,
                 'Price': curr['Close'],
-                'Size': 1 # Equal weighting for visualization
+                'Change %': change_pct,
+                'RVol': rvol,
+                'Above MA': price_above_ma
+            })
+            
+            sector_stock_data.append({
+                'Alpha': alpha_val, 'RVol': rvol, 'Above_MA': price_above_ma
             })
             
         if total_stocks > 0:
-            # --- SECTOR SCORING (THE 0-100 FORMULA) ---
-            avg_alpha = sum(d['Alpha'] for d in sector_scores) / total_stocks
-            avg_rvol = sum(d['RVol'] for d in sector_scores) / total_stocks
-            avg_trend = sum(d['Above_MA'] for d in sector_scores) / total_stocks
+            avg_alpha = sum(d['Alpha'] for d in sector_stock_data) / total_stocks
+            avg_rvol = sum(d['RVol'] for d in sector_stock_data) / total_stocks
+            avg_trend = sum(d['Above_MA'] for d in sector_stock_data) / total_stocks
             pct_green = green_stocks / total_stocks
             
             score = 0
-            if avg_alpha > 0: score += 40      # Market Alpha
-            if avg_rvol > 1.10: score += 30    # Volume Conviction
-            if avg_trend > 0.5: score += 20    # Trend Integrity
-            if pct_green > 0.5: score += 10    # Breadth Bonus
+            if avg_alpha > 0: score += 40
+            if avg_rvol > 1.10: score += 30
+            if avg_trend > 0.5: score += 20
+            if pct_green > 0.5: score += 10
             
-            # --- CRITICAL SAFETY CHECK: THE HARD GATE ---
-            # If Breadth < 50%, CAP the score at 59 (Grey).
-            # This prevents a "Fake Sector" (1 stock rallying) from turning Green.
-            if pct_green <= 0.5:
-                score = min(score, 59)
+            # Hard Gate
+            if pct_green <= 0.5: score = min(score, 59)
                 
-            # Add to results (Flattened for Treemap)
-            for s in sector_scores:
-                results.append({
-                    'Sector': sector,
-                    'Ticker': s['Ticker'],
-                    'Heat Score': score,       # Parent Sector Color
-                    'Stock Score': s['Heat Score'], # Child Stock Color
-                    'RVol': s['RVol'],
-                    'Change %': s['Change %'],
-                    'Price': s['Price'],
-                    'Size': 1
-                })
+            sector_results.append({
+                'Sector': sector,
+                'Heat Score': score,
+                'Size': 1, # Equal Size Blocks
+                'Stocks Count': total_stocks
+            })
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(sector_results), pd.DataFrame(stock_results)
 
-# --- 5. ADHD FOCUS UI ---
+# --- 5. UI ---
 st.title("🦅 2026 Focus Scanner")
 
-if st.button("🚀 RUN FOCUS SCAN", type="primary", use_container_width=True):
-    
-    with st.spinner("Analyzing Market Breadth & Volume..."):
+if st.button("🚀 RUN FOCUS SCAN", type="primary"):
+    with st.spinner("Analyzing Market..."):
         data = fetch_safe_data(ALL_TICKERS)
-        df = run_strict_algorithm(data)
+        df_sectors, df_stocks = run_strict_algorithm(data)
     
-    if not df.empty:
-        # --- A. BIG BANNER (Eliminate Ambiguity) ---
-        # "Passing" Sector = Score >= 60 (Healthy)
-        # We group by sector to count unique sectors passing
-        unique_sectors = df.groupby('Sector')['Heat Score'].first()
-        passing_sectors = len(unique_sectors[unique_sectors >= 60])
-        total_sectors = len(unique_sectors)
-        ratio = passing_sectors / total_sectors
+    if not df_sectors.empty:
+        # --- A. MACRO MAP (Clean Sectors Only) ---
+        st.subheader("1. Macro View (Sectors)")
         
-        if ratio > 0.5:
-            st.success(f"🟢 MARKET STATUS: BULLISH ({ratio:.0%} Sectors Green)")
-        elif ratio > 0.3:
-            st.warning(f"🟡 MARKET STATUS: CHOPPY ({ratio:.0%} Sectors Green)")
-        else:
-            st.error(f"🔴 MARKET STATUS: DEFENSIVE ({ratio:.0%} Sectors Green)")
-
-        # --- B. NESTED HEATMAP (Visual Hierarchy) ---
-        # Path: Market -> Sector -> Ticker
-        # This shows the Sector color primarily, but lets you see the Stocks inside.
         fig = px.treemap(
-            df,
-            path=[px.Constant("Market"), 'Sector', 'Ticker'],
+            df_sectors,
+            path=[px.Constant("Market"), 'Sector'], # No Ticker nesting
             values='Size',
-            color='Heat Score', # Color based on SECTOR Score (The Hard Gated Score)
+            color='Heat Score',
             color_continuous_scale=['#FF4B4B', '#262730', '#00FF00'], 
             range_color=[0, 100],
-            hover_data=['RVol', 'Change %', 'Price'],
-            title="Market Matrix (Zoomable)"
+            title=""
         )
-        
-        # UI Tweak: Show Ticker Label and Value
-        fig.update_traces(textinfo="label+value")
-        fig.update_layout(margin=dict(t=30, l=10, r=10, b=10))
+        fig.update_traces(textinfo="label", textfont=dict(size=18))
+        fig.update_layout(margin=dict(t=0, l=0, r=0, b=0), height=500)
         st.plotly_chart(fig, use_container_width=True)
         
-        # --- C. THE "RULE OF 3" SNIPER LIST ---
+        # --- B. SECTOR INSPECTOR (The Detail View) ---
         st.divider()
-        st.subheader("🎯 Top 3 High-Conviction Setups")
-        st.caption("Stocks in **Green Sectors** with **>1.2x Volume**. Ignore the rest.")
+        st.subheader("2. Sector Inspector")
         
-        # Filter Logic:
-        # 1. Sector Score must be >= 80 (Confirmed Trend)
-        # 2. Individual Stock RVol must be > 1.2 (Institutional Activity)
-        top_picks = df[
-            (df['Heat Score'] >= 80) & 
-            (df['RVol'] > 1.2)
-        ].sort_values('RVol', ascending=False).head(3)
+        # Find the hottest sector to default to
+        hottest_sector = df_sectors.sort_values('Heat Score', ascending=False).iloc[0]['Sector']
         
-        if not top_picks.empty:
-            cols = st.columns(3)
-            for i, (idx, row) in enumerate(top_picks.iterrows()):
-                with cols[i]:
-                    st.metric(
-                        label=f"{row['Ticker']} ({row['Sector']})",
-                        value=f"${row['Price']:.2f}",
-                        delta=f"Vol: {row['RVol']:.1f}x"
-                    )
-        else:
-            st.info("💤 No High-Conviction Setups Found. Cash is a position.")
-
+        # Dropdown to pick sector
+        selected_sector = st.selectbox("Inspect Sector:", df_sectors['Sector'].unique(), index=list(df_sectors['Sector']).index(hottest_sector))
+        
+        # Filter stocks for that sector
+        sector_stocks = df_stocks[df_stocks['Sector'] == selected_sector].sort_values('RVol', ascending=False)
+        
+        # Display as clean Metric Cards
+        st.caption(f"Showing stocks inside **{selected_sector}** sorted by Volume Conviction.")
+        
+        # Grid Layout for stocks
+        cols = st.columns(4)
+        for i, (idx, row) in enumerate(sector_stocks.iterrows()):
+            col_idx = i % 4
+            with cols[col_idx]:
+                # Color code the metric
+                color = "normal"
+                if row['Change %'] > 0: color = "normal" # Streamlit handles green automatically for positive delta
+                
+                st.metric(
+                    label=row['Ticker'],
+                    value=f"${row['Price']:.2f}",
+                    delta=f"{row['Change %']:.2f}% (Vol: {row['RVol']:.1f}x)"
+                )
+                
     else:
-        st.error("Connection Failed. Market may be closed or data blocked.")
+        st.error("Connection Failed. Try again.")
