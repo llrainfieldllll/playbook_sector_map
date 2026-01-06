@@ -47,8 +47,8 @@ def fetch_safe_data(tickers):
     progress_bar = st.progress(0)
     unique_tickers = list(set(tickers))
     
-    # Track failures for Red Team auditing
     fail_count = 0
+    latest_market_time = None # Track the newest candle found
     
     for i, ticker in enumerate(unique_tickers):
         try:
@@ -66,9 +66,13 @@ def fetch_safe_data(tickers):
                     'Volume': quotes['volume']
                 }).dropna()
                 
-                # Validation: Need sufficient data for Moving Averages
                 if len(df) > 22: 
                     data_map[ticker] = df
+                    
+                    # Track latest time found in the dataset
+                    last_ts = df['Date'].iloc[-1]
+                    if latest_market_time is None or last_ts > latest_market_time:
+                        latest_market_time = last_ts
                 else:
                     fail_count += 1
             else:
@@ -83,23 +87,21 @@ def fetch_safe_data(tickers):
             
     progress_bar.empty()
     
-    # Red Team Warning: If >50% failed, alert the user
     if fail_count > (len(unique_tickers) / 2):
-        st.toast(f"⚠️ Warning: {fail_count} tickers failed to load. Data source may be unstable.", icon="⚠️")
+        st.toast(f"⚠️ Warning: {fail_count} tickers failed. Data source unstable.", icon="⚠️")
         
-    return data_map
+    return data_map, latest_market_time
 
 # --- 4. LOGIC ALGORITHM ---
 def run_strict_algorithm(data_map):
     sector_results = []
     stock_results = []
     
-    # --- RED TEAM FIX #1: SPY SOFT FAIL ---
     spy = data_map.get('SPY')
     if spy is None:
-        st.error("⚠️ SPY (Benchmark) failed to load. 'Alpha' scores will be inaccurate.")
-        spy_change = 0.0 # Default to 0 so the app doesn't crash
-        spy_today_date = datetime.now().date() # Fallback date
+        st.error("⚠️ SPY (Benchmark) failed. Alpha scores inaccurate.")
+        spy_change = 0.0
+        spy_today_date = datetime.now().date()
     else:
         spy_today_date = spy['Date'].iloc[-1].date()
         spy_change = (spy['Close'].iloc[-1] - spy['Close'].iloc[-2]) / spy['Close'].iloc[-2] * 100
@@ -114,7 +116,7 @@ def run_strict_algorithm(data_map):
             df = data_map.get(clean_t)
             if df is None: continue
             
-            # Date Alignment Check (skip stale data)
+            # Skip stale data
             if spy is not None and df['Date'].iloc[-1].date() != spy_today_date: 
                 continue 
             
@@ -127,9 +129,7 @@ def run_strict_algorithm(data_map):
             
             alpha_val = change_pct - spy_change
             
-            # --- SENIOR DEV FIX #1: CORRECT VOLUME SLICE ---
-            # Old: [-22:-2] (Ignored yesterday)
-            # New: [-21:-1] (Includes yesterday, excludes today)
+            # Correct Volume Slice: Previous 20 days excluding today
             avg_vol = df['Volume'].iloc[-21:-1].mean()
             rvol = curr['Volume'] / avg_vol if avg_vol > 0 else 0
             
@@ -172,34 +172,40 @@ def run_strict_algorithm(data_map):
 
     return pd.DataFrame(sector_results), pd.DataFrame(stock_results)
 
-# --- 5. UI (WITH TIMESTAMP) ---
+# --- 5. UI (WITH ACCURATE TIMESTAMP) ---
 st.title("🦅 2026 Focus Scanner")
 
 # Initialize Session State
-if 'scan_data' not in st.session_state:
-    st.session_state.scan_data = None
-if 'stocks_data' not in st.session_state:
-    st.session_state.stocks_data = None
-if 'scan_time' not in st.session_state:
-    st.session_state.scan_time = None
+if 'scan_data' not in st.session_state: st.session_state.scan_data = None
+if 'stocks_data' not in st.session_state: st.session_state.stocks_data = None
+if 'scan_time' not in st.session_state: st.session_state.scan_time = None
+if 'market_time' not in st.session_state: st.session_state.market_time = None
 
 if st.button("🚀 RUN FOCUS SCAN", type="primary"):
     with st.spinner("Analyzing Market..."):
-        data = fetch_safe_data(ALL_TICKERS)
+        # Fetch returns data AND the latest timestamp found
+        data, latest_ts = fetch_safe_data(ALL_TICKERS)
         df_sectors, df_stocks = run_strict_algorithm(data)
         
         st.session_state.scan_data = df_sectors
         st.session_state.stocks_data = df_stocks
-        # --- SENIOR DEV FIX #2: SAVE TIMESTAMP ---
-        st.session_state.scan_time = datetime.now().strftime("%H:%M")
+        
+        # Save Timestamps
+        st.session_state.scan_time = datetime.now().strftime("%d %b %Y, %H:%M")
+        
+        if latest_ts:
+            st.session_state.market_time = latest_ts.strftime("%d %b %Y, %H:%M")
+        else:
+            st.session_state.market_time = "Unknown"
 
 if st.session_state.scan_data is not None and not st.session_state.scan_data.empty:
     
     df_sectors = st.session_state.scan_data
     df_stocks = st.session_state.stocks_data
     
-    # Display Timestamp
-    st.caption(f"Last Scanned: {st.session_state.scan_time} (Click Run to Refresh)")
+    # --- TIME DISPLAY ---
+    # Shows WHEN you clicked and HOW OLD the data is
+    st.info(f"**Last Refresh:** {st.session_state.scan_time}  |  **Market Data As Of:** {st.session_state.market_time}")
     
     # --- A. MACRO MAP ---
     st.subheader("1. Macro View (Sectors)")
